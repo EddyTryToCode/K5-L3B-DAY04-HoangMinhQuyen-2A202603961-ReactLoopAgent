@@ -1,6 +1,6 @@
 # Ghi chú phân tích · Day 04
 
-Họ và tên: Hoang Minh Quyen  
+Họ và tên: Hoàng Minh Quyền 
 MSSV: 2A202603961
 
 > **Bài chính:** `eval_before.json`, `eval_after.json`, mục 1–5. **Bonus:** `eval_bonus.json`, mục "Bonus" ở cuối file.
