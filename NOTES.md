@@ -16,20 +16,24 @@ MSSV: 2A202603961
 
 ## 2. Bằng chứng trong trace
 
-Trace A2 trong `eval_before.json` (xem lại bằng `python show_trace.py eval_before.json A2`):
+Trích `eval_before.json` → `cases[7]` (A2) → `result.trace`. Field `result` của tool được rút gọn, `...` là phần lược bỏ:
 
 ```text
-[step 1] MODEL  finish=tool_calls  -> get_incident_details
-         TOOL   get_incident_details({"incident_id":"wp49bp8bqo6c","provider":"cloudflare"})  ok=True
-                url: https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c
-[step 2] MODEL  finish=stop  -> (không gọi tool)
-STATUS: completed   model calls: 2
+{"event": "model", "step": 1, "finish": "tool_calls", "calls": ["get_incident_details"]}
+{"event": "tool", "step": 1, "name": "get_incident_details",
+ "arguments": "{\"incident_id\":\"wp49bp8bqo6c\",\"provider\":\"cloudflare\"}",
+ "result": {"ok": true, "id": "wp49bp8bqo6c", "status": "identified",
+            "url": "https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c", ...}}
+{"event": "model", "step": 2, "finish": "stop", "calls": []}
+```
 
-ANSWER (đoạn cuối):
+`result.status = "completed"`, 2 model calls. Đoạn cuối của `result.answer`:
+
+```text
 ... Trạng thái của incident tại thời điểm kiểm tra là "identified". Nguồn thông tin là từ Cloudflare status page.
 ```
 
-Tool result có sẵn field `"url": "https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c"`, nhưng câu trả lời chỉ nói nguồn bằng lời. Trường hợp E4 tương tự: tool trả `https://stspg.io/pjgptg3cfc6n` nhưng câu trả lời không có link này.
+Ở step 1, tool đã trả về `url` của incident. Đến step 2, model trả lời ngay mà chỉ nêu nguồn bằng lời ("Cloudflare status page"), không chép URL. E4 cũng gặp đúng lỗi này: tool trả `https://stspg.io/pjgptg3cfc6n`, nhưng câu trả lời không có link.
 
 **Nguyên nhân có thể:**
 - System prompt chỉ nói chung chung "Dẫn nguồn từ tool", nên model thường diễn đạt nguồn bằng lời ("status page") thay vì chép URL.
@@ -62,31 +66,39 @@ Tool result có sẵn field `"url": "https://www.cloudflarestatus.com/incidents/
 | Số case thiếu URL incident đã đọc | 6/11 | 0/10 |
 | Số lần `validation_missing_source` | — | 7 |
 
-Trace A2 sau cải tiến (`python show_trace.py eval_after.json A2`):
+Trace A2 sau cải tiến, trích `eval_after.json` → `cases[7]` → `result.trace` (rút gọn như trên):
 
 ```text
-[step 1] MODEL  finish=tool_calls  -> get_incident_details
-         TOOL   get_incident_details({"provider":"cloudflare","incident_id":"wp49bp8bqo6c"})  ok=True
-[step 2] MODEL  finish=stop  -> (không gọi tool)
-         ⚠ VALIDATION  thiếu URL nguồn -> yêu cầu model sửa: ['https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c']
-[step 3] MODEL  finish=stop  -> (không gọi tool)
-STATUS: completed   model calls: 3
-ANSWER (đoạn cuối): ... chi tiết sự cố có thể được tìm thấy tại: https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c.
+{"event": "model", "step": 1, "finish": "tool_calls", "calls": ["get_incident_details"]}
+{"event": "tool", "step": 1, "name": "get_incident_details", "arguments": "...",
+ "result": {"ok": true, "url": "https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c", ...}}
+{"event": "model", "step": 2, "finish": "stop", "calls": []}
+{"event": "validation_missing_source", "step": 2,
+ "observed_urls": ["https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c"]}
+{"event": "model", "step": 3, "finish": "stop", "calls": []}
 ```
+
+`result.status = "completed"`, 3 model calls. Đoạn cuối của `result.answer`:
+
+```text
+... chi tiết sự cố có thể được tìm thấy tại: https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c.
+```
+
+Ở step 2, cổng kiểm tra phát hiện câu trả lời thiếu URL, ghi event `validation_missing_source` và yêu cầu model viết lại. Câu trả lời ở step 3 đã có URL đúng của incident.
 
 Các case thay đổi đáng chú ý:
 
-| Case | Before → After | Gate kích hoạt | Nhận xét |
+| Case | Before → After | Cổng kiểm tra kích hoạt | Nhận xét |
 |---|---|:-:|---|
 | E4 | 85 → 100 | ✅ | Câu trả lời viết lại có URL |
 | A2 | 95 → 98 | ✅ | Judge ghi nhận "URL nguồn đầy đủ" |
 | A7 | 100 → 95 | ✅ | Đã có URL, điểm giảm nhẹ |
 | H3 | 50 → 100 | ❌ | Lần này model tự gọi tool. **Không phải nhờ cải tiến** |
-| E1, E2 | 100 → 90, 85 | ❌ | Gate không chạy. Điểm giảm do model/judge dao động |
+| E1, E2 | 100 → 90, 85 | ❌ | Cổng kiểm tra không chạy; điểm giảm do model/judge dao động |
 
-- **Lỗi đã giải quyết:** thiếu URL incident đã đọc (6 case → 0). 7 lần gate kích hoạt đều được model sửa trong số bước còn lại, không case nào rơi vào `max_steps`.
-- **Cách hiểu mức tăng điểm:** +1,82 phần lớn **không** do cải tiến. Riêng H3 (+50, gate không chạy) đã đóng góp khoảng +2,3 điểm vào trung bình. Tác động thật của gate lên điểm judge chỉ thấy rõ ở E4 và A2, vì judge vốn ít trừ điểm khi thiếu URL (A8 thiếu URL vẫn được 100). Đếm URL bằng code là thước đo đáng tin hơn điểm judge.
-- **Lỗi còn lại hoặc mới xuất hiện** (lỗi hành vi điều tra, không phải lỗi dẫn nguồn, nên gate không sửa được):
+- **Lỗi đã giải quyết:** thiếu URL incident đã đọc (6 case → 0). 7 lần cổng kiểm tra kích hoạt đều được model sửa trong số bước còn lại, không case nào rơi vào `max_steps`.
+- **Cách hiểu mức tăng điểm:** +1,82 phần lớn **không** do cải tiến. Riêng H3 (+50, cổng kiểm tra không chạy) đã đóng góp khoảng +2,3 điểm vào trung bình. Tác động thật của cổng kiểm tra lên điểm judge chỉ thấy rõ ở E4 và A2, vì judge vốn ít trừ điểm khi thiếu URL (A8 thiếu URL vẫn được 100). Đếm URL bằng code là thước đo đáng tin hơn điểm judge.
+- **Lỗi còn lại hoặc mới xuất hiện** (lỗi hành vi điều tra, không phải lỗi dẫn nguồn, nên cổng kiểm tra không sửa được):
 
 | Case | Điểm after | Lỗi trong trace |
 |---|---:|---|
@@ -101,7 +113,7 @@ Hướng tiếp theo: bổ sung quy tắc vào `SYSTEM_PROMPT` (đọc tiếp in
 - **Điểm judge:** judge cùng model với agent (Gemini 2.5 Flash tự chấm), có thể thiên lệch và dễ dãi. Ví dụ A8 thiếu URL vẫn được 100. Điểm judge là ước lượng; các case nêu trên đã được đối chiếu với `expected` và trace.
 - **Snapshot:** dữ liệu chụp ngày 09/11/2026, không phản ánh trạng thái hiện tại. Kết quả offline tests (fake provider) chỉ chứng minh loop đúng contract, không chứng minh agent trả lời đúng với model thật.
 - **Chỉ chạy một lần mỗi phiên bản:** các case E1, E2, H3 cho thấy điểm một case có thể dao động 10–50 điểm giữa hai lần chạy mà không có thay đổi liên quan, nên +1,82 nằm trong khoảng nhiễu. Cần chạy nhiều lần để kết luận về độ ổn định.
-- **Giới hạn của cải tiến:** gate chỉ kiểm tra câu trả lời có chứa URL. Nó không chứng minh mọi claim đều có nguồn, cũng không kiểm tra URL gắn đúng claim. Khi đọc nhiều incident, chỉ cần một URL là qua. Gate tốn thêm model call (+6 call, +34% chi phí agent), và với `max_steps` thấp có thể làm run rơi vào `max_steps`.
+- **Giới hạn của cải tiến:** cổng kiểm tra chỉ xét câu trả lời có chứa URL. Nó không chứng minh mọi claim đều có nguồn, cũng không kiểm tra URL gắn đúng claim. Khi đọc nhiều incident, chỉ cần một URL là qua. Cơ chế này tốn thêm model call (+6 call, +34% chi phí agent), và với `max_steps` thấp có thể làm run rơi vào `max_steps`.
 
 **Demo:** trace nhiều bước A2 trong `eval_after.json` (tool → thiếu URL → `validation_missing_source` → sửa). Lỗi agent: H7, giả định Cloudflare operational khi tool timeout.
 
@@ -165,16 +177,22 @@ Mọi lần chạy dùng cùng cấu hình. Các lần chạy trung gian lưu �
 - **Nhắc retry bằng code (`validation_pending_retry`):** nếu model định trả lời cuối khi còn tool bị 429 chưa dùng hết lượt, agent nhắc model gọi lại. Mỗi tool/provider chỉ nhắc 1 lần, và không nhắc ở step cuối.
 - Kết quả: B6 50 → 98 (gọi `get_incident_details` 4 lần, cho cả Vercel `w661l7k3kf4p` và npm `cc0t2r4403sy`). B7 → 100. B10 50 → 100.
 
-**Evidence cho phần nhắc retry bằng code.** Ở lần chạy Bước 3, event này không kích hoạt: B10 retry được là nhờ prompt. Ở lần chạy chính thức, event **đã kích hoạt** ở B10:
+**Evidence cho phần nhắc retry bằng code.** Ở lần chạy Bước 3, event này không kích hoạt: B10 retry được là nhờ prompt. Ở lần chạy chính thức, event **đã kích hoạt** ở B10. Trích `eval_bonus.json` → `cases[9]` (B10) → `result.trace`, đã lược bỏ `id`, `arguments` và phần lớn `result`:
 
-```
-[step 1] get_github_status, get_npm_status, get_vercel_status (RATE_LIMITED), get_cloudflare_status, get_digitalocean_status
-[step 2] finish=stop -> validation_pending_retry: get_vercel_status   ← model định trả lời mà chưa retry
-[step 3] get_vercel_status  ok=True                                    ← retry thành công
-[step 4] finish=stop -> completed
+```text
+{"event": "model", "step": 1, "finish": "tool_calls", "calls": ["get_github_status", "get_npm_status",
+ "get_vercel_status", "get_cloudflare_status", "get_digitalocean_status"]}
+{"event": "tool", "step": 1, "name": "get_vercel_status", "attempt": 1, "result": {"ok": false, "error": "RATE_LIMITED", ...}}
+{"event": "retry_wait", "step": 1, "name": "get_vercel_status", "attempt": 1, "wait_seconds": 0.0}
+   (4 event "tool" thành công của GitHub, npm, Cloudflare, DigitalOcean ở step 1 được lược bỏ)
+{"event": "model", "step": 2, "finish": "stop", "calls": []}
+{"event": "validation_pending_retry", "step": 2, "pending": "get_vercel_status"}
+{"event": "model", "step": 3, "finish": "tool_calls", "calls": ["get_vercel_status"]}
+{"event": "tool", "step": 3, "name": "get_vercel_status", "attempt": 2, "result": {...}}
+{"event": "model", "step": 4, "finish": "stop", "calls": []}
 ```
 
-Như vậy prompt không phải lúc nào cũng đủ, và kiểm tra bằng code bắt được trường hợp model bỏ sót.
+Ở step 2, model định trả lời khi Vercel mới bị 429 một lần và chưa được thử lại. Cổng kiểm tra chặn câu trả lời đó và nhắc model gọi lại; đến step 3, lần gọi thứ hai thành công. Như vậy chỉ dựa vào prompt là chưa đủ, và kiểm tra bằng code đã bắt được trường hợp model bỏ sót.
 
 **B4 (429 liên tục) ở lần chính thức:** đúng 3 lần `get_vercel_status` ở 3 step (attempt 1, 2, 3, có 2 `retry_wait`), sau đó model dừng và báo không xác định được Vercel. Không có lần gọi thứ 4.
 
@@ -216,7 +234,7 @@ Vì vậy `eval_after.json` vẫn phản ánh đúng hành vi của `agent.py` b
 | Tokens (agent) | 43.521 | 42.205 | 72.855 | 80.030 |
 | Chi phí agent (USD, OpenRouter báo) | 0,0286 | 0,0283 | 0,0267 | 0,0264 |
 
-Tokens tăng khoảng 70–85% do prompt dài hơn và gọi `get_incident_details` nhiều hơn. Chi phí OpenRouter báo lại giảm nhẹ. Mình chưa xác định được lý do (có thể do cache hoặc cách tính giá của provider), nên chỉ ghi lại số liệu như provider báo.
+Tokens tăng khoảng 70–85% do prompt dài hơn và gọi `get_incident_details` nhiều hơn. Tuy vậy, chi phí do OpenRouter báo lại giảm nhẹ. Em chưa xác định được nguyên nhân (có thể do cache hoặc cách tính giá của provider), nên chỉ ghi lại đúng số liệu provider trả về.
 
 ### Giới hạn còn lại
 
