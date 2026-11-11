@@ -1,107 +1,109 @@
-# Ghi chú bài lab: Status Investigation Agent
+# Ghi chú phân tích · Day 04
 
-**Bài chính:** `eval_before.json`, `eval_after.json`, các mục từ "Cấu hình" đến "Demo".
-**Bonus:** `eval_bonus.json`, xem mục [Bonus](#bonus-tùy-chọn) ở cuối file.
+Họ và tên:
+MSSV:
 
-## Cấu hình
+> **Bài chính:** `eval_before.json`, `eval_after.json`, mục 1–5. **Bonus:** `eval_bonus.json`, mục "Bonus" ở cuối file.
+>
+> **Cấu hình chung của hai lần chạy:** agent và judge `openrouter` / `google/gemini-2.5-flash` (judge mặc định, cùng model), snapshot 09/11/2026, bộ eval `core` (22 case), `max_steps` 8. Khối `config` trong `eval_before.json` và `eval_after.json` giống nhau.
 
-| | Giá trị |
-|---|---|
-| Agent provider / model | `openrouter` / `google/gemini-2.5-flash` |
-| Judge | Mặc định, cùng provider/model với agent |
-| Dữ liệu | Snapshot ngày 09/11/2026, bộ eval `core` (22 case) |
-| `max_steps` | 8 (mặc định của eval runner) |
-| Hai lần chạy | `eval_before.json` (agent loop cơ bản), `eval_after.json` (thêm kiểm tra nguồn) |
+## 1. Case được chọn
 
-Hai lần chạy dùng cùng model, judge, snapshot, `max_steps` và dataset.
+- **ID case:** A2. Lỗi chung được chọn: agent đã đọc incident bằng `get_incident_details` thành công nhưng câu trả lời không dẫn URL incident. Ở `eval_before.json`, 6/11 case có `get_incident_details` thành công bị lỗi này: E3, E4, **A2**, A7, A8, H6. Case phụ: E4.
+- **Câu hỏi A2:** incident Cloudflare `wp49bp8bqo6c` có chứng minh CLB (không thuộc FedRAMP) bị ảnh hưởng không; chỉ ra thông báo cụ thể, trạng thái và nguồn.
+- **Câu trả lời của agent (lần 1, rút gọn):** trích đúng thông báo *"Khách hàng không phải FedRAMP không bị ảnh hưởng"*, kết luận CLB không bị ảnh hưởng, trạng thái "identified", và kết thúc bằng *"Nguồn thông tin là từ Cloudflare status page."* Câu trả lời **không có URL incident**. Ngoài ra, đoạn đầu bị lặp lại hai lần.
+- **Điểm ở lần chạy 1:** A2 = 95 (judge: *"agent không cung cấp URL cụ thể của incident, dù dữ liệu đã có"*). E4 = 85.
 
-## Case được chọn và evidence trong trace
+## 2. Bằng chứng trong trace
 
-**Lỗi chọn:** agent đã đọc incident bằng `get_incident_details` thành công nhưng câu trả lời không dẫn URL incident.
+Trace A2 trong `eval_before.json` (xem lại bằng `python show_trace.py eval_before.json A2`):
 
-Ở `eval_before.json`, 6/11 case có `get_incident_details` thành công bị thiếu URL: E3, E4, A2, A7, A8, H6.
+```text
+[step 1] MODEL  finish=tool_calls  -> get_incident_details
+         TOOL   get_incident_details({"incident_id":"wp49bp8bqo6c","provider":"cloudflare"})  ok=True
+                url: https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c
+[step 2] MODEL  finish=stop  -> (không gọi tool)
+STATUS: completed   model calls: 2
 
-**Case chính: A2.** Câu hỏi: incident Cloudflare `wp49bp8bqo6c` có chứng minh CLB (không thuộc FedRAMP) bị ảnh hưởng không, và yêu cầu chỉ ra thông báo, trạng thái và nguồn.
+ANSWER (đoạn cuối):
+... Trạng thái của incident tại thời điểm kiểm tra là "identified". Nguồn thông tin là từ Cloudflare status page.
+```
 
-- Trace before: một bước `get_incident_details(cloudflare, wp49bp8bqo6c)`, kết quả `ok: true` và có `url = https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c`.
-- Câu trả lời before kết thúc bằng *"Nguồn thông tin là từ Cloudflare status page."* và không có URL. Judge ghi: *"agent không cung cấp URL cụ thể của incident, dù dữ liệu đã có"*. Điểm 95.
+Tool result có sẵn field `"url": "https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c"`, nhưng câu trả lời chỉ nói nguồn bằng lời. Trường hợp E4 tương tự: tool trả `https://stspg.io/pjgptg3cfc6n` nhưng câu trả lời không có link này.
 
-**Case phụ: E4** (incident GitHub `xr3myzj7ms51`). Câu trả lời before không có URL `https://stspg.io/pjgptg3cfc6n`, dù tool đã trả URL này. Điểm 85.
+**Nguyên nhân có thể:**
+- System prompt chỉ nói chung chung "Dẫn nguồn từ tool", nên model thường diễn đạt nguồn bằng lời ("status page") thay vì chép URL.
+- Agent loop chấp nhận ngay final answer khi `finish == 'stop'`, không có bước nào kiểm tra câu trả lời trước khi trả về.
 
-**Nguyên nhân có thể:** system prompt chỉ nói chung chung "Dẫn nguồn từ tool". Model thường diễn đạt nguồn bằng lời ("status page") thay cho URL. Agent loop không có bước nào kiểm tra câu trả lời trước khi chấp nhận.
+Đây là lỗi ở **loop** (thiếu bước kiểm tra), không phải lỗi dữ liệu: URL đã có trong tool result.
 
-## Thay đổi đã làm (`agent.py`)
+## 3. Thay đổi đã thực hiện
 
-Thêm cổng kiểm tra nguồn vào agent loop:
+- **Sửa gì, ở đâu:** thêm cổng kiểm tra nguồn trong `run_agent` ở `agent.py`.
+  1. Mỗi lần `get_incident_details` trả `ok: true`, lưu `result['url']` vào `observed_urls`.
+  2. Khi model trả final answer (`finish == 'stop'`, không còn tool call): nếu `observed_urls` không rỗng và câu trả lời không chứa URL nào trong đó, agent ghi event `validation_missing_source` vào trace, gửi model một message yêu cầu viết lại có dẫn URL, rồi `continue` để model sửa trong số bước còn lại.
+  3. Hết `max_steps` mà vẫn thiếu nguồn thì trả `max_steps`, không trả `completed`.
+  4. Không có incident nào đọc thành công (ID sai, tool lỗi) thì không bắt buộc URL.
+- **Vì sao chọn thay đổi này:**
+  - Lỗi xuất hiện ở nhiều case (6/11), và có thể kiểm tra **bằng code**, không phụ thuộc model tự giác.
+  - Đây là contract bắt buộc trong `tests/test_validation.py`.
+  - Thay đổi ít, không đụng tới hành vi khác của loop.
+- **Tests:** `python -m unittest discover -s tests -v`: 37/37 test được cung cấp pass, gồm cả `EvidenceGateTests`.
+- **Phiên bản:** `eval_after.json` được tạo từ `agent.py` ở commit `5b0d415`. `agent.py` bản nộp cuối có thêm phần bonus, nhưng các phần thêm chỉ kích hoạt với bộ tools bonus hoặc lỗi 429, nên hành vi với tools bài chính không đổi (xem mục Bonus).
 
-1. Mỗi lần `get_incident_details` trả `ok: true`, lưu `result['url']` vào `observed_urls`.
-2. Khi model trả final answer (`finish == 'stop'`, không còn tool call): nếu `observed_urls` không rỗng và câu trả lời không chứa URL nào trong đó, agent sẽ:
-   - ghi event `validation_missing_source` vào trace;
-   - gửi model một message yêu cầu viết lại câu trả lời và dẫn URL;
-   - `continue` để model sửa trong số bước còn lại.
-3. Hết `max_steps` mà vẫn thiếu nguồn thì trả `max_steps`, không trả `completed`.
-4. Không có incident nào đọc thành công thì không bắt buộc URL. Ví dụ: ID không tồn tại, tool lỗi.
+## 4. So sánh hai lần chạy
 
-Tests offline: `python -m unittest discover -s tests -v` pass **37/37** test được cung cấp, gồm cả `EvidenceGateTests` trong `tests/test_validation.py`. (Sau phần bonus có thêm 7 test tự viết, xem mục Bonus.)
+| Chỉ số | `eval_before.json` | `eval_after.json` |
+|---|---|---|
+| Điểm tổng | 89,68 | 91,50 |
+| Điểm case đã chọn | A2: 95 · E4: 85 | A2: 98 · E4: 100 |
+| Số model calls | 44 | 50 |
+| Token, chi phí nếu có | 32.033 token agent · $0,0211 agent + $0,0162 judge | 41.889 token agent · $0,0283 agent + $0,0165 judge |
+| Số case thiếu URL incident đã đọc | 6/11 | 0/10 |
+| Số lần `validation_missing_source` | — | 7 |
 
-`eval_after.json` được tạo từ `agent.py` ở commit `5b0d415`. `agent.py` bản nộp cuối có thêm phần bonus, nhưng các phần thêm chỉ kích hoạt với bộ tools bonus hoặc lỗi 429, nên hành vi với tools bài chính không đổi (xem mục Bonus).
+Trace A2 sau cải tiến (`python show_trace.py eval_after.json A2`):
 
-## Kết quả so sánh
+```text
+[step 1] MODEL  finish=tool_calls  -> get_incident_details
+         TOOL   get_incident_details({"provider":"cloudflare","incident_id":"wp49bp8bqo6c"})  ok=True
+[step 2] MODEL  finish=stop  -> (không gọi tool)
+         ⚠ VALIDATION  thiếu URL nguồn -> yêu cầu model sửa: ['https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c']
+[step 3] MODEL  finish=stop  -> (không gọi tool)
+STATUS: completed   model calls: 3
+ANSWER (đoạn cuối): ... chi tiết sự cố có thể được tìm thấy tại: https://www.cloudflarestatus.com/incidents/wp49bp8bqo6c.
+```
 
-### Tổng quan
-
-| | Before | After | Thay đổi |
-|---|---:|---:|---:|
-| Điểm eval (22/22 case được chấm) | 89,68 | 91,50 | +1,82 |
-| Số case thiếu URL incident đã đọc | 6/11 | 0/10 | −6 |
-| Số lần `validation_missing_source` | — | 7 | |
-| Model calls của agent | 44 | 50 | +6 |
-| Tokens của agent | 32.033 | 41.889 | +31% |
-| Chi phí agent (USD, OpenRouter báo) | 0,0211 | 0,0283 | +34% |
-| Chi phí judge (USD) | 0,0162 | 0,0165 | ≈ |
-
-### Theo case (chỉ liệt kê case có thay đổi hoặc case đáng chú ý)
+Các case thay đổi đáng chú ý:
 
 | Case | Before → After | Gate kích hoạt | Nhận xét |
 |---|---|:-:|---|
-| E4 | 85 → 100 | ✅ | Câu trả lời viết lại có `https://stspg.io/pjgptg3cfc6n` |
-| A2 | 95 → 98 | ✅ | Câu trả lời viết lại có URL Cloudflare. Judge ghi nhận "URL nguồn đầy đủ" |
-| A7 | 100 → 95 | ✅ | Đã có URL, điểm giảm nhẹ, có thể do câu trả lời viết lại |
-| H1, H2, H6 | 60, 50, 60 → không đổi | ✅ | Đã có URL, nhưng lỗi chính không nằm ở nguồn (xem phần lỗi còn lại) |
+| E4 | 85 → 100 | ✅ | Câu trả lời viết lại có URL |
+| A2 | 95 → 98 | ✅ | Judge ghi nhận "URL nguồn đầy đủ" |
+| A7 | 100 → 95 | ✅ | Đã có URL, điểm giảm nhẹ |
 | H3 | 50 → 100 | ❌ | Lần này model tự gọi tool. **Không phải nhờ cải tiến** |
 | E1, E2 | 100 → 90, 85 | ❌ | Gate không chạy. Điểm giảm do model/judge dao động |
-| E3 | 98 → 100 | ❌ | Lần này model không gọi `get_incident_details` |
-| H7 | 80 → 75 | ❌ | Vẫn lỗi (xem bên dưới) |
 
-### Diễn giải
-
-- **Chỉ số trực tiếp của cải tiến đạt mục tiêu.** Mọi case có đọc incident thành công đều dẫn URL. 7 lần gate kích hoạt đều được model sửa trong số bước còn lại, không case nào rơi vào `max_steps`.
-- **Mức tăng điểm tổng (+1,82) phần lớn không do cải tiến.** Riêng H3 (+50 điểm, gate không chạy) đã đóng góp khoảng +2,3 điểm vào trung bình. Các case E1 và E2 giảm 10–15 điểm dù agent không đổi hành vi. Tác động thực của gate lên điểm judge chỉ thấy rõ ở E4 và A2.
-- Judge vốn ít trừ điểm khi thiếu URL: A8 thiếu URL ở lần before vẫn được 100. Vì vậy điểm judge không phải thước đo tốt cho cải tiến này. Đếm URL bằng code là thước đo đáng tin hơn.
-- Chi phí: thêm 6 model call (+34% chi phí agent) cho 7 lần viết lại.
-
-## Lỗi còn lại hoặc mới xuất hiện
+- **Lỗi đã giải quyết:** thiếu URL incident đã đọc (6 case → 0). 7 lần gate kích hoạt đều được model sửa trong số bước còn lại, không case nào rơi vào `max_steps`.
+- **Cách hiểu mức tăng điểm:** +1,82 phần lớn **không** do cải tiến. Riêng H3 (+50, gate không chạy) đã đóng góp khoảng +2,3 điểm vào trung bình. Tác động thật của gate lên điểm judge chỉ thấy rõ ở E4 và A2, vì judge vốn ít trừ điểm khi thiếu URL (A8 thiếu URL vẫn được 100). Đếm URL bằng code là thước đo đáng tin hơn điểm judge.
+- **Lỗi còn lại hoặc mới xuất hiện** (lỗi hành vi điều tra, không phải lỗi dẫn nguồn, nên gate không sửa được):
 
 | Case | Điểm after | Lỗi trong trace |
 |---|---:|---|
-| H1, H6 | 60 | Incident `h02n9572mx9y` dẫn tới `xr3myzj7ms51`, nhưng agent không đọc tiếp. Mechanical check: *"Cần tool calls ở ít nhất 2 model steps khác nhau"* |
+| H1, H6 | 60 | Incident `h02n9572mx9y` dẫn tới `xr3myzj7ms51`, nhưng agent không đọc tiếp. Mechanical: *"Cần tool calls ở ít nhất 2 model steps khác nhau"* |
 | H2 | 50 | Không gọi `get_status`, nên không dùng snapshot (Actions operational) để bác bỏ tiền đề sai "Actions đang outage" |
-| H7 | 75 | Cloudflare trả `TimeoutError`, nhưng agent viết *"Cloudflare Spectrum không truy cập được (có thể là do lỗi timeout), nên chúng tôi giả định nó đang hoạt động"*. Agent đã làm theo yêu cầu bịa dữ liệu trong câu hỏi. Đây là lỗi nghiêm trọng hơn con số 75 cho thấy |
+| H7 | 75 | Cloudflare trả `TimeoutError`, nhưng agent viết *"…nên chúng tôi giả định nó đang hoạt động"*. Agent đã làm theo yêu cầu bịa dữ liệu trong câu hỏi. Lỗi này nghiêm trọng hơn con số 75 cho thấy |
 
-Các lỗi này thuộc hành vi điều tra (đọc tiếp liên kết, kiểm tra tiền đề, không suy ra trạng thái khi tool lỗi), không thuộc dẫn nguồn, nên gate không sửa được. Hướng tiếp theo: bổ sung các quy tắc tương ứng vào `SYSTEM_PROMPT`. Với H7, có thể thêm kiểm tra bằng code: nếu một provider có tool result `ok: false` thì câu trả lời không được khẳng định provider đó "operational".
+Hướng tiếp theo: bổ sung quy tắc vào `SYSTEM_PROMPT` (đọc tiếp incident được dẫn tới, kiểm tra tiền đề bằng `get_status`, tool lỗi thì không suy ra operational). Với H7, có thể thêm kiểm tra bằng code: provider có tool result `ok: false` thì câu trả lời không được nói provider đó "operational".
 
-## Giới hạn
+## 5. Giới hạn
 
-- **Mỗi phiên bản chỉ chạy một lần.** Các case E1, E2, H3 cho thấy điểm một case có thể dao động 10–50 điểm giữa hai lần chạy mà không có thay đổi liên quan, nên +1,82 nằm trong khoảng nhiễu. Cần chạy nhiều lần để kết luận về độ ổn định.
-- **Judge cùng model với agent** (Gemini 2.5 Flash tự chấm), có thể thiên lệch và dễ dãi. Điểm judge là ước lượng. Ở các case trên mình đã đối chiếu với `expected` và trace.
-- **Gate chỉ kiểm tra câu trả lời có chứa URL**, không chứng minh mọi claim đều có nguồn, cũng không kiểm tra URL được gắn đúng với claim. Khi đọc nhiều incident, chỉ cần một URL là đã qua.
-- Gate tốn thêm model call. Nếu dùng `max_steps` thấp, agent có thể rơi vào `max_steps` thay vì hoàn thành.
-- Dữ liệu là snapshot ngày 09/11/2026, không phản ánh trạng thái hiện tại. Kết quả offline tests (fake provider) không chứng minh agent trả lời đúng với model thật.
+- **Điểm judge:** judge cùng model với agent (Gemini 2.5 Flash tự chấm), có thể thiên lệch và dễ dãi. Ví dụ A8 thiếu URL vẫn được 100. Điểm judge là ước lượng; các case nêu trên đã được đối chiếu với `expected` và trace.
+- **Snapshot:** dữ liệu chụp ngày 09/11/2026, không phản ánh trạng thái hiện tại. Kết quả offline tests (fake provider) chỉ chứng minh loop đúng contract, không chứng minh agent trả lời đúng với model thật.
+- **Chỉ chạy một lần mỗi phiên bản:** các case E1, E2, H3 cho thấy điểm một case có thể dao động 10–50 điểm giữa hai lần chạy mà không có thay đổi liên quan, nên +1,82 nằm trong khoảng nhiễu. Cần chạy nhiều lần để kết luận về độ ổn định.
+- **Giới hạn của cải tiến:** gate chỉ kiểm tra câu trả lời có chứa URL. Nó không chứng minh mọi claim đều có nguồn, cũng không kiểm tra URL gắn đúng claim. Khi đọc nhiều incident, chỉ cần một URL là qua. Gate tốn thêm model call (+6 call, +34% chi phí agent), và với `max_steps` thấp có thể làm run rơi vào `max_steps`.
 
-## Demo
-
-- **Trace nhiều bước:** A2 hoặc E4 trong `eval_after.json`, gồm tool `get_incident_details` → final answer thiếu URL → `validation_missing_source` → câu trả lời đã sửa có URL.
-- **Lỗi agent:** H7, agent giả định Cloudflare operational khi tool bị timeout.
+**Demo:** trace nhiều bước A2 trong `eval_after.json` (tool → thiếu URL → `validation_missing_source` → sửa). Lỗi agent: H7, giả định Cloudflare operational khi tool timeout.
 
 ---
 
